@@ -375,19 +375,28 @@ def add_new_sheet(iDocument2D, kompas_object, api5_module, constants,
     """
     logger.info("Adding new sheet...")
 
-    sheet_param = api5_module.ksSheetPar(
-        kompas_object.GetParamStruct(constants.ko_SheetParam)
+    # Build sheet parameters using the same pattern as create_drawing_document.
+    # There is no ko_SheetParam constant in the KOMPAS API — the ksSheetPar
+    # interface must be obtained via ksDocumentParam.GetLayoutParam().
+    doc_param = api5_module.ksDocumentParam(
+        kompas_object.GetParamStruct(constants.ko_DocumentParam)
     )
-    sheet_param.Init()
-    # layoutName = "" → use default graphic.lyt library (correct convention)
-    sheet_param.layoutName = ""
-    # shtType = 13 → "Без внутренней рамки" (without inner frame / title block)
-    sheet_param.shtType = 13
-    sheet_param.format = sheet_format
-    sheet_param.multiply = 1
-    sheet_param.direct = landscape
+    doc_param.Init()
+    doc_param.type = 1  # lt_DocSheetStandart
 
-    result = iDocument2D.ksNewSheet(sheet_param)
+    sheet_par = doc_param.GetLayoutParam()
+    sheet_par.Init()
+    # layoutName = "" → use default graphic.lyt library (correct convention)
+    sheet_par.layoutName = ""
+    # shtType = 13 → "Без внутренней рамки" (without inner frame / title block)
+    sheet_par.shtType = 13
+
+    standart_sheet = sheet_par.GetSheetParam()
+    standart_sheet.format = sheet_format
+    standart_sheet.multiply = 1
+    standart_sheet.direct = landscape
+
+    result = iDocument2D.ksNewSheet(sheet_par)
     if not result:
         logger.warning("ksNewSheet returned False, trying alternative method...")
         # Alternative: use ksInsertSheet
