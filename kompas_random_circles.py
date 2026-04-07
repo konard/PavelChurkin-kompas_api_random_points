@@ -375,7 +375,7 @@ def add_new_sheet(iDocument2D, kompas_object, api5_module, constants,
     """
     logger.info("Adding new sheet...")
 
-    sheet_param = api5_module.ksSheetParam(
+    sheet_param = api5_module.ksSheetPar(
         kompas_object.GetParamStruct(constants.ko_SheetParam)
     )
     sheet_param.Init()
