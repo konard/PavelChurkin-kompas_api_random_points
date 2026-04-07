@@ -47,8 +47,7 @@ def main():
     print(f"  Inner radius: {inner_radius} mm")
 
     draw_coaxial_circles(
-        iDocument2D, kompas_object, api5_module, constants,
-        positions, outer_radius, inner_radius,
+        iDocument2D, positions, outer_radius, inner_radius,
     )
 
     print("Done! Check the KOMPAS-3D window.")

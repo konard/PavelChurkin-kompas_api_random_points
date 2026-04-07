@@ -155,9 +155,23 @@ def create_drawing_document(kompas_object, api5_module, constants,
 
     sheet_par = doc_param.GetLayoutParam()
     sheet_par.Init()
+    # layoutName: name of the layout/style library.
+    # An empty string means "use the default graphic.lyt library".
+    # Per the KOMPAS SDK docs, passing the full path causes malfunctions;
+    # passing an empty string is the correct way to use the default library.
+    sheet_par.layoutName = ""
+    # shtType: selects the layout (оформление) from the library by its
+    # "Номер" (number) column value in graphic.lyt.
+    # Common values (from KOMPAS graphic.lyt):
+    #   1  – "Чертеж констр. Первый лист. ГОСТ 2.104-2006" (standard 1st sheet)
+    #   2  – "Чертеж констр. Последующие листы. ГОСТ 2.104-2006"
+    #   13 – "Без внутренней рамки" (without inner frame / title block)
+    # When no_frame=True we want shtType=13 ("без внутренней рамки").
+    # Setting shtType=0 produces an undefined/default style — use 13 instead.
     if no_frame:
-        sheet_par.layoutName = ""
-    sheet_par.shtType = 0
+        sheet_par.shtType = 13  # "Без внутренней рамки" (no inner frame)
+    else:
+        sheet_par.shtType = 1   # Standard first-sheet layout with title block
 
     standart_sheet = sheet_par.GetSheetParam()
     standart_sheet.format = sheet_format
@@ -269,18 +283,14 @@ def generate_circle_positions(count, area, outer_radius, min_distance,
     return positions
 
 
-def draw_coaxial_circles(iDocument2D, kompas_object, api5_module, constants,
-                         positions, outer_radius, inner_radius):
+def draw_coaxial_circles(iDocument2D, positions, outer_radius, inner_radius):
     """Draw coaxial circle pairs with black fill at the given positions.
 
-    Each pair is two concentric circles with black hatching (solid fill)
+    Each pair is two concentric circles with solid black fill (ksColouring)
     between them.
 
     Args:
         iDocument2D: KOMPAS 2D document interface.
-        kompas_object: KOMPAS API5 application object.
-        api5_module: API5 module.
-        constants: KOMPAS constants module.
         positions: List of (x, y) center coordinates.
         outer_radius: Outer circle radius in mm.
         inner_radius: Inner circle radius in mm.
@@ -297,38 +307,54 @@ def draw_coaxial_circles(iDocument2D, kompas_object, api5_module, constants,
         iDocument2D.ksCircle(cx, cy, outer_radius, 1)
         iDocument2D.ksCircle(cx, cy, inner_radius, 1)
 
-        # Create hatching (solid black fill) between the two circles
-        hatch_param = api5_module.ksHatchParam(
-            kompas_object.GetParamStruct(constants.ko_HatchParam)
-        )
-        hatch_param.Init()
-        # Solid fill: style 6 is solid fill in KOMPAS
-        # (style 0 = standard cross-hatch, style 6 = solid)
-        hatch_param.style = 6
-        hatch_param.ang = 0
-        hatch_param.step = 1
-        hatch_param.color = 0  # Black color (0x000000 in BGR)
-        hatch_param.width = 0
-        hatch_param.x = cx
-        hatch_param.y = cy
+        # Create solid black fill between the two circles.
+        #
+        # KOMPAS-3D Automation (COM) API5 notes:
+        #
+        # 1. ksHatch Automation signature:
+        #      long ksHatch(long style, double ang, double step,
+        #                   double width, double x0, double y0)
+        #    It takes INDIVIDUAL scalar arguments, NOT a struct.
+        #    The struct-based version (ksHatchParam) is only available in
+        #    the native SDK (C++) interface, not in the COM Automation layer.
+        #    The Automation equivalent is ksHatchByParam, but that is not
+        #    exposed in the gencache binding either.
+        #
+        # 2. ksHatch boundary convention:
+        #    - Call ksHatch() first to start the hatch object
+        #    - Then draw boundary primitives (circles, arcs, etc.)
+        #    - Call ksEndObj() last to finalise; it returns a reference to
+        #      the created hatch object
+        #    There is no separate ksNewGroup/ksContour/ksEndGroup needed;
+        #    the primitives drawn between ksHatch() and ksEndObj() become
+        #    the boundary automatically.
+        #
+        # 3. System hatch styles (from KOMPAS SDK hstyles table):
+        #      0=Metal, 1=Non-metal, 2=Wood, 3=Stone, 4=Ceramics,
+        #      5=Concrete, 6=Glass, 7=Liquid, 8=Natural soil, 9=Fill soil,
+        #      10=Artificial stone, 11=Reinforced concrete,
+        #      12=Stressed RC, 13=Wood (longitudinal), 14=Sand
+        #    None of these is "solid fill". For an opaque solid fill use
+        #    ksColouring(color) instead (a separate API).
+        #
+        # 4. ksColouring Automation signature:
+        #      long ksColouring(long color)
+        #    Then draw boundary primitives, then ksEndObj() finalises.
+        #    color = 0 → black (BGR 0x000000).
+        #
+        # Strategy: use ksColouring(0) for a solid black fill, because
+        # ksHatch only supports patterned material styles, not solid fill.
 
-        # Set up boundaries: outer circle as boundary, inner as hole
-        hatch_param.boundaries = iDocument2D.ksNewGroup(1)
+        # Start solid-fill object (colour 0 = black in KOMPAS BGR palette)
+        iDocument2D.ksColouring(0)
 
-        # Outer boundary contour
-        iDocument2D.ksContour(1)
+        # Boundary primitives: outer circle (exterior boundary) and inner
+        # circle (hole), drawn in any order between ksColouring and ksEndObj.
         iDocument2D.ksCircle(cx, cy, outer_radius, 1)
-        iDocument2D.ksEndObj()
-
-        # Inner boundary contour (creates the hole)
-        iDocument2D.ksContour(1)
         iDocument2D.ksCircle(cx, cy, inner_radius, 1)
+
+        # Finalise the fill object
         iDocument2D.ksEndObj()
-
-        iDocument2D.ksEndGroup()
-
-        # Apply hatching
-        iDocument2D.ksHatch(hatch_param)
 
     logger.info("All circle pairs drawn successfully.")
 
@@ -353,8 +379,10 @@ def add_new_sheet(iDocument2D, kompas_object, api5_module, constants,
         kompas_object.GetParamStruct(constants.ko_SheetParam)
     )
     sheet_param.Init()
-    sheet_param.layoutName = ""  # No frame (bez ramok)
-    sheet_param.shtType = 0
+    # layoutName = "" → use default graphic.lyt library (correct convention)
+    sheet_param.layoutName = ""
+    # shtType = 13 → "Без внутренней рамки" (without inner frame / title block)
+    sheet_param.shtType = 13
     sheet_param.format = sheet_format
     sheet_param.multiply = 1
     sheet_param.direct = landscape
@@ -437,8 +465,7 @@ def run_drawing(settings):
 
         # Draw the circles
         draw_coaxial_circles(
-            iDocument2D, kompas_object, api5_module, constants,
-            positions, outer_radius, inner_radius,
+            iDocument2D, positions, outer_radius, inner_radius,
         )
 
         logger.info("Sheet %d completed with %d circle pairs.",
