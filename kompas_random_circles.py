@@ -360,7 +360,8 @@ def draw_coaxial_circles(iDocument2D, positions, outer_radius, inner_radius):
 
 
 def add_new_sheet(iDocument2D, kompas_object, api5_module, constants,
-                  sheet_format=4, landscape=False, app7=None):
+                  sheet_format=4, landscape=False, app7=None,
+                  api7_module=None):
     """Add a new sheet to the current document and activate it for drawing.
 
     Uses the API7 ILayoutSheets.Add() method to add a page, which is the
@@ -368,28 +369,33 @@ def add_new_sheet(iDocument2D, kompas_object, api5_module, constants,
     interface does not have a ksNewSheet method.
 
     After adding the sheet, activates the new sheet's system view using the
-    API5 ksGetReferenceDocumentPartEx / ksGetViewNumber / ksOpenView methods
-    so that subsequent iDocument2D drawing commands target the new sheet.
+    API7 IView.Current property (via ViewsAndLayersManager) so that subsequent
+    iDocument2D drawing commands target the new sheet.
 
     Args:
         iDocument2D: KOMPAS 2D document interface (API5).
-        kompas_object: KOMPAS API5 application object (unused but kept for
-            backward compatibility).
-        api5_module: API5 module (unused but kept for backward compatibility).
-        constants: KOMPAS constants module (unused but kept for backward
-            compatibility).
+        kompas_object: KOMPAS API5 application object.
+        api5_module: API5 module (gencache result).
+        constants: KOMPAS constants module.
         sheet_format: Sheet format index (0=A0 .. 4=A4).
         landscape: Orientation flag. True = landscape (horizontal).
         app7: KOMPAS API7 application object (IApplication).
+        api7_module: API7 module (gencache result), needed for QueryInterface.
 
     Returns:
         1-based index of the newly added sheet.
     """
+    import pythoncom
+
     logger.info("Adding new sheet...")
 
     if app7 is None:
         raise RuntimeError(
             "app7 (KOMPAS API7 IApplication) is required to add a new sheet."
+        )
+    if api7_module is None:
+        raise RuntimeError(
+            "api7_module is required to add a new sheet."
         )
 
     # Get the active document via API7 and add a new layout sheet.
@@ -397,6 +403,20 @@ def add_new_sheet(iDocument2D, kompas_object, api5_module, constants,
     # we set the desired format and call Update() to apply.
     doc7 = app7.ActiveDocument
     layout_sheets = doc7.LayoutSheets
+
+    # Record number of views before adding the sheet, so we can identify
+    # the new system view that gets created for the new sheet.
+    iKompasDoc2D = api7_module.IKompasDocument2D(
+        doc7._oleobj_.QueryInterface(
+            api7_module.IKompasDocument2D.CLSID,
+            pythoncom.IID_IDispatch,
+        )
+    )
+    views_mgr = iKompasDoc2D.ViewsAndLayersManager
+    views = views_mgr.Views
+    views_before = views.Count
+    logger.debug("Views count before adding sheet: %d", views_before)
+
     new_sheet = layout_sheets.Add()
 
     # Configure sheet format via ISheetFormat (returned by ILayoutSheet.Format)
@@ -421,23 +441,80 @@ def add_new_sheet(iDocument2D, kompas_object, api5_module, constants,
     # Activate the new sheet's system view so that subsequent API5 drawing
     # commands (ksCircle, ksColouring, etc.) target this sheet and not sheet 1.
     #
-    # ksGetReferenceDocumentPartEx(t=0, SheetNumb) returns a reference to the
-    # sheet decoration object for the given 1-based sheet number.
-    # ksGetViewNumber(ref) converts that reference to a view number.
-    # ksOpenView(number) makes that view the current active drawing view.
-    sheet_ref = iDocument2D.ksGetReferenceDocumentPartEx(0, new_sheet_number)
-    if sheet_ref:
-        view_num = iDocument2D.ksGetViewNumber(sheet_ref)
-        iDocument2D.ksOpenView(view_num)
-        logger.info(
-            "Activated system view (view_num=%s) for sheet %d.",
-            view_num, new_sheet_number,
+    # Strategy: When a new sheet is added, KOMPAS creates a new system view
+    # for it. We find this view by checking which views are new (appeared
+    # after the Add() call), then set it as current using IView.Current=True.
+    #
+    # Re-query views after Add() since the collection changed.
+    views = views_mgr.Views
+    views_after = views.Count
+    logger.debug("Views count after adding sheet: %d", views_after)
+
+    view_activated = False
+
+    if views_after > views_before:
+        # The last view in the collection is the system view for the new sheet.
+        # Views collection is 0-based.
+        new_view = views.View(views_after - 1)
+        logger.debug(
+            "Activating new view (index=%d, name=%s)...",
+            views_after - 1,
+            getattr(new_view, 'Name', '?'),
         )
-    else:
+
+        # Get the IDrawingObject interface to call Update().
+        try:
+            iDrawingObj = api7_module.IDrawingObject(
+                new_view._oleobj_.QueryInterface(
+                    api7_module.IDrawingObject.CLSID,
+                    pythoncom.IID_IDispatch,
+                )
+            )
+            new_view.Current = True
+            iDrawingObj.Update()
+            view_activated = True
+            logger.info(
+                "Activated system view for sheet %d via API7 IView.Current.",
+                new_sheet_number,
+            )
+        except Exception as exc:
+            logger.warning(
+                "API7 IView.Current approach failed: %s. "
+                "Trying ksOpenView fallback...", exc,
+            )
+
+    if not view_activated:
+        # Fallback: try ksOpenView with the view number.
+        # When a new sheet is added, its system view number is typically
+        # equal to the new sheet number minus 1 (0-based), but this depends
+        # on the KOMPAS version. Try common patterns.
         logger.warning(
-            "Could not get reference for sheet %d; drawing may target wrong sheet.",
+            "Could not activate view via API7 for sheet %d; "
+            "trying ksCreateSheetView fallback...",
             new_sheet_number,
         )
+        # Create a new user view on the current context.
+        # ksCreateSheetView creates a view and makes it current.
+        view_param = api5_module.ksViewParam(
+            kompas_object.GetParamStruct(constants.ko_ViewParam)
+        )
+        view_param.Init()
+        view_param.x = 0
+        view_param.y = 0
+        view_param.scale_ = 1
+        view_param.name = f"Sheet{new_sheet_number}"
+        view_number = 0  # auto-assign number
+        ref = iDocument2D.ksCreateSheetView(view_param, view_number)
+        if ref:
+            logger.info(
+                "Created and activated new view via ksCreateSheetView "
+                "for sheet %d.", new_sheet_number,
+            )
+            view_activated = True
+        else:
+            logger.warning(
+                "ksCreateSheetView also failed for sheet %d.", new_sheet_number,
+            )
 
     logger.info("New sheet %d added.", new_sheet_number)
     return new_sheet_number
@@ -491,7 +568,7 @@ def run_drawing(settings):
             add_new_sheet(
                 iDocument2D, kompas_object, api5_module, constants,
                 sheet_format=sheet_format, landscape=landscape,
-                app7=app7,
+                app7=app7, api7_module=api7_module,
             )
 
         # Calculate drawing area
