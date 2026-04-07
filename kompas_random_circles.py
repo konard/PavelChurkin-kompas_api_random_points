@@ -360,47 +360,54 @@ def draw_coaxial_circles(iDocument2D, positions, outer_radius, inner_radius):
 
 
 def add_new_sheet(iDocument2D, kompas_object, api5_module, constants,
-                  sheet_format=4, landscape=False):
+                  sheet_format=4, landscape=False, app7=None):
     """Add a new sheet to the current document.
 
-    Uses ksNewSheet method from the API5 to add a page.
+    Uses the API7 ILayoutSheets.Add() method to add a page, which is the
+    correct way to add sheets to an existing document. The API5 ksDocument2D
+    interface does not have a ksNewSheet method.
 
     Args:
-        iDocument2D: KOMPAS 2D document interface.
-        kompas_object: KOMPAS API5 application object.
-        api5_module: API5 module.
-        constants: KOMPAS constants module.
-        sheet_format: Sheet format index.
-        landscape: Orientation flag.
+        iDocument2D: KOMPAS 2D document interface (API5, unused but kept for
+            backward compatibility).
+        kompas_object: KOMPAS API5 application object (unused but kept for
+            backward compatibility).
+        api5_module: API5 module (unused but kept for backward compatibility).
+        constants: KOMPAS constants module (unused but kept for backward
+            compatibility).
+        sheet_format: Sheet format index (0=A0 .. 4=A4).
+        landscape: Orientation flag. True = landscape (horizontal).
+        app7: KOMPAS API7 application object (IApplication).
     """
     logger.info("Adding new sheet...")
 
-    # Build sheet parameters using the same pattern as create_drawing_document.
-    # There is no ko_SheetParam constant in the KOMPAS API — the ksSheetPar
-    # interface must be obtained via ksDocumentParam.GetLayoutParam().
-    doc_param = api5_module.ksDocumentParam(
-        kompas_object.GetParamStruct(constants.ko_DocumentParam)
-    )
-    doc_param.Init()
-    doc_param.type = 1  # lt_DocSheetStandart
+    if app7 is None:
+        raise RuntimeError(
+            "app7 (KOMPAS API7 IApplication) is required to add a new sheet."
+        )
 
-    sheet_par = doc_param.GetLayoutParam()
-    sheet_par.Init()
-    # layoutName = "" → use default graphic.lyt library (correct convention)
-    sheet_par.layoutName = ""
-    # shtType = 13 → "Без внутренней рамки" (without inner frame / title block)
-    sheet_par.shtType = 13
+    # Get the active document via API7 and add a new layout sheet.
+    # ILayoutSheets.Add() adds a sheet with default parameters; afterwards
+    # we set the desired format and call Update() to apply.
+    doc7 = app7.ActiveDocument
+    layout_sheets = doc7.LayoutSheets
+    new_sheet = layout_sheets.Add()
 
-    standart_sheet = sheet_par.GetSheetParam()
-    standart_sheet.format = sheet_format
-    standart_sheet.multiply = 1
-    standart_sheet.direct = landscape
+    # Configure sheet format via ISheetFormat (returned by ILayoutSheet.Format)
+    sheet_fmt = new_sheet.Format
+    # Format values match ksDocumentFormatEnum: 0=A0, 1=A1, 2=A2, 3=A3, 4=A4
+    sheet_fmt.Format = sheet_format
+    sheet_fmt.FormatMultiplicity = 1
+    # VerticalOrientation = True means portrait; landscape means NOT vertical
+    sheet_fmt.VerticalOrientation = not landscape
 
-    result = iDocument2D.ksNewSheet(sheet_par)
+    # LayoutStyleNumber = 13 → "Без внутренней рамки" (no inner frame),
+    # same meaning as shtType=13 in API5.
+    new_sheet.LayoutStyleNumber = 13
+
+    result = new_sheet.Update()
     if not result:
-        logger.warning("ksNewSheet returned False, trying alternative method...")
-        # Alternative: use ksInsertSheet
-        result = iDocument2D.ksInsertSheet()
+        logger.warning("ILayoutSheet.Update() returned False when adding sheet.")
 
     logger.info("New sheet added: %s", result)
     return result
@@ -454,6 +461,7 @@ def run_drawing(settings):
             add_new_sheet(
                 iDocument2D, kompas_object, api5_module, constants,
                 sheet_format=sheet_format, landscape=landscape,
+                app7=app7,
             )
 
         # Calculate drawing area
