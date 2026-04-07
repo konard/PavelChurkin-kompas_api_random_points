@@ -361,15 +361,18 @@ def draw_coaxial_circles(iDocument2D, positions, outer_radius, inner_radius):
 
 def add_new_sheet(iDocument2D, kompas_object, api5_module, constants,
                   sheet_format=4, landscape=False, app7=None):
-    """Add a new sheet to the current document.
+    """Add a new sheet to the current document and activate it for drawing.
 
     Uses the API7 ILayoutSheets.Add() method to add a page, which is the
     correct way to add sheets to an existing document. The API5 ksDocument2D
     interface does not have a ksNewSheet method.
 
+    After adding the sheet, activates the new sheet's system view using the
+    API5 ksGetReferenceDocumentPartEx / ksGetViewNumber / ksOpenView methods
+    so that subsequent iDocument2D drawing commands target the new sheet.
+
     Args:
-        iDocument2D: KOMPAS 2D document interface (API5, unused but kept for
-            backward compatibility).
+        iDocument2D: KOMPAS 2D document interface (API5).
         kompas_object: KOMPAS API5 application object (unused but kept for
             backward compatibility).
         api5_module: API5 module (unused but kept for backward compatibility).
@@ -378,6 +381,9 @@ def add_new_sheet(iDocument2D, kompas_object, api5_module, constants,
         sheet_format: Sheet format index (0=A0 .. 4=A4).
         landscape: Orientation flag. True = landscape (horizontal).
         app7: KOMPAS API7 application object (IApplication).
+
+    Returns:
+        1-based index of the newly added sheet.
     """
     logger.info("Adding new sheet...")
 
@@ -409,8 +415,32 @@ def add_new_sheet(iDocument2D, kompas_object, api5_module, constants,
     if not result:
         logger.warning("ILayoutSheet.Update() returned False when adding sheet.")
 
-    logger.info("New sheet added: %s", result)
-    return result
+    # Determine the 1-based index of the new sheet (last one after Add).
+    new_sheet_number = layout_sheets.Count
+
+    # Activate the new sheet's system view so that subsequent API5 drawing
+    # commands (ksCircle, ksColouring, etc.) target this sheet and not sheet 1.
+    #
+    # ksGetReferenceDocumentPartEx(t=0, SheetNumb) returns a reference to the
+    # sheet decoration object for the given 1-based sheet number.
+    # ksGetViewNumber(ref) converts that reference to a view number.
+    # ksOpenView(number) makes that view the current active drawing view.
+    sheet_ref = iDocument2D.ksGetReferenceDocumentPartEx(0, new_sheet_number)
+    if sheet_ref:
+        view_num = iDocument2D.ksGetViewNumber(sheet_ref)
+        iDocument2D.ksOpenView(view_num)
+        logger.info(
+            "Activated system view (view_num=%s) for sheet %d.",
+            view_num, new_sheet_number,
+        )
+    else:
+        logger.warning(
+            "Could not get reference for sheet %d; drawing may target wrong sheet.",
+            new_sheet_number,
+        )
+
+    logger.info("New sheet %d added.", new_sheet_number)
+    return new_sheet_number
 
 
 # ---------------------------------------------------------------------------
